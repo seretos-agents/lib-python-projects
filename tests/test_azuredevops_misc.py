@@ -3350,6 +3350,7 @@ def test_get_ref_short_commit_sha_returns_full_sha(monkeypatch: pytest.MonkeyPat
     assert ref is not None
     assert ref.kind == "commit"
     assert ref.sha == FULL_SHA
+    assert FULL_SHA in ref.url
 
 
 def test_list_runs_for_commit_short_sha_resolves_full(
