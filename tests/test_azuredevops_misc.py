@@ -3326,3 +3326,54 @@ def test_list_releases_sorted_most_recent_first_before_limit(
     _install_mock(monkeypatch, handler)
     releases = AzureDevOpsProvider().list_releases(_project(), token="t", limit=1)
     assert [r.tag for r in releases] == ["v2.0.0"]
+
+
+# ---------- ticket #298 -- abbreviated commit sha ----------------------------
+
+FULL_SHA = "c847b8a92afd46fe7914917cefd015b8a5e1eec1"
+SHORT_SHA = "c847b8a"
+
+
+def test_get_ref_short_commit_sha_returns_full_sha(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/_apis/git/repositories"):
+            return _json({"value": [{"id": "repo-guid", "name": "azure-tests"}]})
+        if "/_apis/git/repositories/repo-guid/refs" in path:
+            return _refs_response([])
+        if f"/_apis/git/repositories/repo-guid/commits/{SHORT_SHA}" in path:
+            return _json({"commitId": FULL_SHA})
+        raise AssertionError(f"unexpected {path}")
+
+    _install_mock(monkeypatch, handler)
+    ref = AzureDevOpsProvider().get_ref(_project(), token="t", ref=SHORT_SHA)
+    assert ref is not None
+    assert ref.kind == "commit"
+    assert ref.sha == FULL_SHA
+
+
+def test_list_runs_for_commit_short_sha_resolves_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builds_requests: list[str] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith("/_apis/build/builds"):
+            builds_requests.append(path)
+            return _json({"value": [_build_payload(5, sourceVersion=FULL_SHA)]})
+        if path.endswith("/_apis/build/definitions"):
+            return _json({"value": [{"id": 1, "name": "CI"}]})
+        if path.endswith("/_apis/git/repositories"):
+            return _json({"value": [{"id": "repo-guid", "name": "azure-tests"}]})
+        if path.endswith(f"/_apis/git/repositories/repo-guid/commits/{SHORT_SHA}"):
+            return _json({"commitId": FULL_SHA})
+        raise AssertionError(f"unexpected {path}")
+
+    _install_mock(monkeypatch, handler)
+    runs, resolved_refs = AzureDevOpsProvider().list_runs_for_commit(
+        _project(), token="t", sha=SHORT_SHA, limit=10
+    )
+    assert [r.id for r in runs] == ["5"]
+    assert resolved_refs == [FULL_SHA]
+    assert len(builds_requests) == 1
