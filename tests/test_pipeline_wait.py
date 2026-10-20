@@ -215,6 +215,45 @@ def test_no_ci_sentinel_returns_no_runs_immediately(monkeypatch):
     assert script.count == 1
 
 
+def test_short_sha_first_poll_green(monkeypatch):
+    """#298: an abbreviated sha is resolved to the full sha, so the head_sha
+    filter matches and the run is found on the first poll."""
+    full = "c847b8a92afd46fe7914917cefd015b8a5e1eec1"
+    short = "c847b8a"
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith(f"/commits/{short}"):
+            return _resp({"sha": full})
+        if path.endswith("/actions/runs"):
+            if req.url.params.get("head_sha") == full:
+                run = dict(_gh_run(1))
+                run["head_sha"] = full
+                return _resp({"workflow_runs": [run]})
+            return _resp({"workflow_runs": []})
+        if path.endswith("/actions/workflows"):
+            return _resp({"total_count": 1, "workflows": [{"id": 1}]})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        github_provider,
+        "_client",
+        lambda token: httpx.Client(
+            base_url=github_provider.API_BASE,
+            headers={"Accept": "application/vnd.github+json"},
+            transport=transport,
+        ),
+    )
+    clock = FakeClock()
+    result = GitHubProvider().wait_for_pipeline(
+        _gh_project(), "t", short, now=clock.now, sleep=clock.sleep,
+        timeout_s=600.0, poll_interval_s=20.0,
+    )
+    assert result.state == "success"
+    assert clock.sleeps == []
+
+
 # ---------- cancelled / skipped => no_verdict, all providers ------------------
 
 

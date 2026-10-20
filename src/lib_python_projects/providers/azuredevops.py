@@ -2025,8 +2025,11 @@ def _resolve_ado_commit(
     project: "ProjectConfig",
     repo_id: str,
     sha: str,
-) -> bool:
-    """Return ``True`` if commit `sha` exists in `repo_id`, ``False`` otherwise.
+) -> str | None:
+    """Return the full commit id of `sha` in `repo_id`, ``None`` if absent.
+
+    `sha` may be abbreviated; the body's ``commitId`` is the full sha
+    (falling back to the input when the body has none / is not JSON).
 
     Best-effort — non-success responses (including a genuine 404) are
     treated as ``False`` rather than raised, so a secondary lookup failure
@@ -2038,9 +2041,16 @@ def _resolve_ado_commit(
     )
     try:
         resp = client.get(path, params=_api_version_params())
-        return resp.is_success
+        if not resp.is_success:
+            return None
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001
+            body = None
+        commit_id = body.get("commitId") if isinstance(body, dict) else None
+        return commit_id or sha
     except Exception:  # noqa: BLE001
-        return False
+        return None
 
 
 def _resolve_ado_tag(
@@ -5840,22 +5850,31 @@ class AzureDevOpsProvider(
             project, token, params, status, 200,
             event=event, since=since, definition_id=definition_id,
         )
-        filtered_by_sha = [r for r in raw_runs if r.head_sha == sha]
-        runs = apply_run_filters(
-            filtered_by_sha, provider="azuredevops",
-            workflow=client_side_workflow, event=event,
-            since=since, limit=limit,
-        )
+
+        def _matching(target: str) -> list[PipelineRun]:
+            return apply_run_filters(
+                [r for r in raw_runs if r.head_sha == target],
+                provider="azuredevops",
+                workflow=client_side_workflow, event=event,
+                since=since, limit=limit,
+            )
+
+        runs = _matching(sha)
         if runs:
             return runs, [sha]
         repo_id = self._resolve_repository_id(project, token)
         with _client(project, token) as c:
-            exists = _resolve_ado_commit(c, project, repo_id, sha)
-        if not exists:
+            full = _resolve_ado_commit(c, project, repo_id, sha)
+        if full is None:
             return [], []
+        if full != sha:
+            # `sha` was abbreviated: builds carry the full sourceVersion.
+            runs = _matching(full)
+            if runs:
+                return runs, [full]
         if not self.is_ci_configured(project, token):
-            return [], [sha, NO_CI_SENTINEL]
-        return [], [sha]
+            return [], [full, NO_CI_SENTINEL]
+        return [], [full]
 
     def list_runs_for_tag(
         self,
@@ -6379,10 +6398,11 @@ class AzureDevOpsProvider(
                     name=ref, kind="tag", sha=tag_sha,
                     url=f"{base_url}?version=GT{quote(ref, safe='')}",
                 )
-            if _resolve_ado_commit(c, project, repo_id, ref):
+            full = _resolve_ado_commit(c, project, repo_id, ref)
+            if full:
                 return Ref(
-                    name=ref, kind="commit", sha=ref,
-                    url=f"{base_url}?version=GC{quote(ref, safe='')}",
+                    name=ref, kind="commit", sha=full,
+                    url=f"{base_url}?version=GC{quote(full, safe='')}",
                 )
         return None
 

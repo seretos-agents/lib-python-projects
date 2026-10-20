@@ -6603,10 +6603,11 @@ class GitHubProvider(
         """
         _validate_limit(limit)
         with _client(token) as client:
-            if not _resolve_commit(client, project, sha):
+            full = _resolve_commit(client, project, sha)
+            if full is None:
                 return [], []
             raw_runs = _list_runs_for_commit(
-                client, project, sha, status, limit,
+                client, project, full, status, limit,
                 workflow=workflow, event=event, since=since,
             )
             runs = apply_run_filters(
@@ -6616,10 +6617,10 @@ class GitHubProvider(
                 since=since, limit=limit,
             )
             if runs:
-                return runs, [sha]
+                return runs, [full]
             if not _has_workflows(client, project):
-                return [], [sha, NO_CI_SENTINEL]
-            return [], [sha]
+                return [], [full, NO_CI_SENTINEL]
+            return [], [full]
 
     def list_runs_for_tag(
         self,
@@ -7008,10 +7009,11 @@ class GitHubProvider(
                     name=ref, kind="tag", sha=tag_sha,
                     url=f"https://github.com/{project.owner}/{project.repo}/releases/tag/{ref}",
                 )
-            if _resolve_commit(client, project, ref):
+            full = _resolve_commit(client, project, ref)
+            if full:
                 return Ref(
-                    name=ref, kind="commit", sha=ref,
-                    url=f"https://github.com/{project.owner}/{project.repo}/commit/{ref}",
+                    name=ref, kind="commit", sha=full,
+                    url=f"https://github.com/{project.owner}/{project.repo}/commit/{full}",
                 )
         return None
 
@@ -7438,13 +7440,17 @@ def _resolve_commit(
     client: httpx.Client,
     project: ProjectConfig,
     sha: str,
-) -> bool:
-    """Return ``True`` if `sha` resolves to a commit, ``False`` on 404/422."""
+) -> str | None:
+    """Return the full commit sha `sha` resolves to, ``None`` on 404/422.
+
+    `sha` may be abbreviated; GitHub's commit endpoint expands it. Falls
+    back to the input when the body carries no ``sha``.
+    """
     r = client.get(f"{_repo_path(project)}/commits/{sha}")
     if r.status_code in (404, 422):
-        return False
+        return None
     _check(r)
-    return True
+    return (r.json() or {}).get("sha") or sha
 
 
 # ---------- issue-template discovery (ticket #259) --------------------------

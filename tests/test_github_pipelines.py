@@ -443,11 +443,14 @@ def test_list_runs_for_branch_with_runs(
     assert resolved_refs == [sha]
 
 
+@pytest.mark.parametrize("sha", ["deadbeef", "dead"])
 def test_list_runs_for_commit_not_found(
     monkeypatch: pytest.MonkeyPatch,
+    sha: str,
 ) -> None:
-    """Commit probe 404 → ([], [])."""
-    sha = "deadbeef"
+    """Commit probe 404 → ([], []); an unknown prefix behaves like an
+    unknown full sha, and no /actions/runs request is made (the handler
+    raises on anything but the commit probe)."""
 
     def handler(req: httpx.Request) -> httpx.Response:
         if f"/commits/{sha}" in req.url.path:
@@ -2265,3 +2268,55 @@ def test_list_releases_maps_fields_and_resolves_peeled_sha(monkeypatch):
     assert rel.body == "Release notes"
     assert rel.created_at == "2026-01-01T00:00:00Z"
     assert rel.published_at == "2026-01-02T00:00:00Z"
+
+
+# ---------- ticket #298 -- abbreviated commit sha ----------------------------
+
+FULL_SHA = "c847b8a92afd46fe7914917cefd015b8a5e1eec1"
+SHORT_SHA = "c847b8a"
+
+
+def test_list_runs_for_commit_short_sha_queries_full_head_sha(monkeypatch):
+    """GitHub's head_sha filter only matches the full sha, so a prefix must
+    be resolved via /commits first and the full sha used everywhere."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path.endswith(f"/commits/{SHORT_SHA}"):
+            return _json({"sha": FULL_SHA})
+        if path.endswith("/actions/runs"):
+            if req.url.params.get("head_sha") == FULL_SHA:
+                return _json({"workflow_runs": [_run_payload(77, FULL_SHA)]})
+            return _json({"workflow_runs": []})
+        if path.endswith("/actions/workflows"):
+            return _json({"total_count": 1, "workflows": [{"id": 1}]})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    seen = _install_mock(monkeypatch, handler)
+    runs, resolved_refs = GitHubProvider().list_runs_for_commit(
+        _project(), token="t", sha=SHORT_SHA,
+    )
+    assert seen[0].url.path.endswith(f"/commits/{SHORT_SHA}")
+    runs_reqs = [r for r in seen if r.url.path.endswith("/actions/runs")]
+    assert runs_reqs[0].url.params["head_sha"] == FULL_SHA
+    assert len(runs) == 1
+    assert resolved_refs == [FULL_SHA]
+
+
+def test_get_ref_short_commit_sha_returns_full_sha(monkeypatch):
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == f"/repos/acme/backend/branches/{SHORT_SHA}":
+            return _json({"message": "Branch not found"}, status_code=404)
+        if path == f"/repos/acme/backend/git/refs/tags/{SHORT_SHA}":
+            return _json({"message": "Not Found"}, status_code=404)
+        if path == f"/repos/acme/backend/commits/{SHORT_SHA}":
+            return _json({"sha": FULL_SHA})
+        raise AssertionError(f"unexpected request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+    ref = GitHubProvider().get_ref(_project(), token="t", ref=SHORT_SHA)
+    assert ref is not None
+    assert ref.kind == "commit"
+    assert ref.sha == FULL_SHA
+    assert FULL_SHA in ref.url
