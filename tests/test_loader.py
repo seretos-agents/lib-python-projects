@@ -229,7 +229,9 @@ class TestLocalPathAutoDiscovery:
         assert got == str((tmp_path / "sibling").resolve())
 
     def test_config_absolute_local_path_unchanged(self, tmp_path: Path) -> None:
-        absolute = str(tmp_path / "elsewhere" / "repo")
+        # Non-normalised (contains `..`): an unconditional .resolve() on
+        # absolute values would rewrite it, so byte-identity proves pass-through.
+        absolute = str(tmp_path / "elsewhere" / ".." / "repo")
         got = self._load_local_path(tmp_path, f"'{absolute}'")
         assert got == absolute
 

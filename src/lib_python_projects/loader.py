@@ -203,6 +203,9 @@ def _load_yaml_projects(
     do document-level failures (bad top-level shape, unsupported
     version).
 
+    A relative `local_path` on an entry is resolved against the config
+    file's directory; absolute and empty values are left unchanged.
+
     Side effect: loads any `env_file` declared in the document (or the
     conventional `.env` lookups) into the process environment.
     """
@@ -266,6 +269,18 @@ def _load_yaml_projects(
                 f"{yaml_path}: duplicate project id '{project.id}'"
             )
         seen_ids.add(project.id)
+        # A relative `local_path` is anchored at the config file's
+        # directory (like `env_file`), so a committed projects.yml is
+        # portable. Anything with an anchor (root or drive) and the empty
+        # string pass through byte-identical.
+        if project.local_path and Path(project.local_path).anchor == "":
+            project = project.model_copy(
+                update={
+                    "local_path": str(
+                        (yaml_path.parent / project.local_path).resolve()
+                    )
+                }
+            )
         projects.append(project)
     return projects, invalid_projects
 
