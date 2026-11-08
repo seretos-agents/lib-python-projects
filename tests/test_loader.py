@@ -197,6 +197,45 @@ class TestLocalPathAutoDiscovery:
         configured = [p for p in result.projects if p.source == "config"]
         assert configured[0].local_path == "/repos/backend"
 
+    def _load_local_path(self, tmp_path: Path, yaml_value: str) -> str | None:
+        _make_git_repo(tmp_path)
+        cfg = tmp_path / ".seretos" / "project-issues.yml"
+        _write(cfg, f"""
+            version: 1
+            projects:
+              - id: a
+                provider: github
+                path: acme/backend
+                local_path: {yaml_value}
+        """)
+        result = load_projects(cwd=tmp_path)
+        assert result.state == "ok"
+        configured = [p for p in result.projects if p.source == "config"]
+        return configured[0].local_path
+
+    def test_config_relative_local_path_resolved_against_yaml_dir(
+        self, tmp_path: Path
+    ) -> None:
+        cfg_dir = tmp_path / ".seretos"
+        got = self._load_local_path(tmp_path, "projects/space-server")
+        assert got is not None
+        assert Path(got).is_absolute()
+        assert got == str((cfg_dir / "projects" / "space-server").resolve())
+
+    def test_config_relative_local_path_with_parent_segment_normalised(
+        self, tmp_path: Path
+    ) -> None:
+        got = self._load_local_path(tmp_path, "../sibling")
+        assert got == str((tmp_path / "sibling").resolve())
+
+    def test_config_absolute_local_path_unchanged(self, tmp_path: Path) -> None:
+        absolute = str(tmp_path / "elsewhere" / "repo")
+        got = self._load_local_path(tmp_path, f"'{absolute}'")
+        assert got == absolute
+
+    def test_config_empty_local_path_unchanged(self, tmp_path: Path) -> None:
+        assert self._load_local_path(tmp_path, '""') == ""
+
     def test_local_path_unset_when_no_git_repo(self, tmp_path: Path) -> None:
         # No .git/ → no auto-discovered entry, no local_path to stamp.
         cfg = tmp_path / ".seretos" / "project-issues.yml"
