@@ -490,7 +490,8 @@ class ProjectConfig(BaseModel):
     `local_path` (new in lib v0.1.0) records the local filesystem checkout
     of this project, when known. It is auto-populated by the loader for
     `source="git-remote"` projects (from the discovered git-repo root) and
-    readable from YAML for `source="config"` projects.
+    readable from YAML for `source="config"` projects, where a relative
+    value is resolved against the YAML file's directory.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -548,7 +549,8 @@ class ProjectConfig(BaseModel):
     default_branch: str = "main"
     # On-disk checkout path, when known. Optional for both config- and
     # git-remote-sourced projects; populated by the loader for the
-    # auto-discovered CWD repo.
+    # auto-discovered CWD repo. A relative value from YAML is resolved
+    # against the config file's directory by the loader.
     local_path: str | None = None
     # Optional board configuration: an ordered list of logical columns plus
     # a provider-specific binding. Resolution logic (turning this into

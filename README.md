@@ -634,7 +634,9 @@ result = load_projects(
 - `ProjectConfig.local_path: str | None = None` — the local checkout path
   for the project, when known. Auto-populated for `source="git-remote"`
   projects from the discovered git-repo root; readable from YAML for
-  `source="config"` projects.
+  `source="config"` projects, where a relative value is resolved against
+  the YAML file's directory (like `env_file`); absolute and empty values
+  are left unchanged.
 - Ticket #200: `trigger_pipeline`/`wait_for_run` (trigger a
   `workflow_dispatch`-style pipeline and reliably resolve the run it
   created), `workflow`/`event`/`since` filters on all five run-listing
