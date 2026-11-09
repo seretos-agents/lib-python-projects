@@ -8146,7 +8146,8 @@ def _get_failure_excerpt(
 
     A 403/404 on either side leaves `annotations=[]` or
     `log_excerpt=None`; an overall `note` is set when at least one job
-    had unavailable logs.
+    had unavailable logs, or when the run has no jobs / no failed or
+    cancelled job (likely provider/infrastructure or startup error).
     """
     jobs_r = client.get(
         f"{_repo_path(project)}/actions/runs/{run_id}/jobs",
@@ -8209,5 +8210,20 @@ def _get_failure_excerpt(
                 job_id=str(job.get("id") or ""),
             )
         )
-    note = "logs unavailable" if logs_missing else None
+    note: str | None
+    if not jobs:
+        note = (
+            "no job was started or recorded for this run (0 jobs); the cause "
+            "is likely provider/infrastructure-side or a workflow startup "
+            "error — re-running the workflow is the suggested next step"
+        )
+    elif not failing:
+        note = (
+            f"{len(jobs)} job(s) recorded but none ended failure/cancelled; "
+            "the run-level failure is likely provider/infrastructure-side or "
+            "a workflow startup error — re-running the workflow is the "
+            "suggested next step"
+        )
+    else:
+        note = "logs unavailable" if logs_missing else None
     return PipelineFailure(failing_jobs=failing, note=note)

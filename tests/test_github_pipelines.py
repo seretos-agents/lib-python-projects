@@ -2375,12 +2375,13 @@ def test_get_run_failed_run_zero_jobs_sets_infra_note(
     assert "re-run" in low
 
 
+@pytest.mark.parametrize("job_count", [1, 2, 3])
 def test_get_run_failed_run_no_failing_jobs_sets_infra_note(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, job_count: int,
 ) -> None:
     """Jobs exist but none ended failure/cancelled: same kind of note,
     stating the job count, the infra/startup cause and the re-run advice."""
-    run_id = 42673681
+    run_id = 42673681 + job_count
 
     def job(job_id: int, conclusion: str) -> dict:
         return {
@@ -2394,7 +2395,13 @@ def test_get_run_failed_run_no_failing_jobs_sets_infra_note(
 
     _install_run_with_jobs(
         monkeypatch, _failed_run_payload, run_id, "nofail001",
-        {"total_count": 2, "jobs": [job(801, "success"), job(802, "skipped")]},
+        {
+            "total_count": job_count,
+            "jobs": [
+                job(800 + i, "success" if i % 2 else "skipped")
+                for i in range(job_count)
+            ],
+        },
     )
 
     run = GitHubProvider().get_run(
@@ -2406,7 +2413,7 @@ def test_get_run_failed_run_no_failing_jobs_sets_infra_note(
     note = run.failure.note
     assert note is not None
     low = note.lower()
-    assert "2 job" in low
+    assert f"{job_count} job" in low
     assert "infrastructure" in low
     assert "startup" in low
     assert "re-run" in low

@@ -1249,7 +1249,7 @@ class PipelineFailure:
     """Aggregated failure context for a single completed-failed run."""
 
     failing_jobs: list[FailingJob]
-    note: str | None = None  # e.g. "logs unavailable"
+    note: str | None = None  # e.g. "logs unavailable", "no job was started or recorded ..."
 
     @property
     def failures(self) -> list[FailureAnnotation]:
