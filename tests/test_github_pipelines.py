@@ -2320,3 +2320,93 @@ def test_get_ref_short_commit_sha_returns_full_sha(monkeypatch):
     assert ref.kind == "commit"
     assert ref.sha == FULL_SHA
     assert FULL_SHA in ref.url
+
+
+# ---------- #302: failed run without any failing job -------------------------
+
+
+def _install_run_with_jobs(monkeypatch, run_payload_fn, run_id, head_sha, jobs_payload):
+    def handler(req: httpx.Request) -> httpx.Response:
+        path = req.url.path
+        if path == f"/repos/acme/backend/actions/runs/{run_id}":
+            return _json(run_payload_fn(run_id, head_sha))
+        if path == f"/repos/acme/backend/actions/runs/{run_id}/jobs":
+            return _json(jobs_payload)
+        raise AssertionError(f"unexpected JSON request: {req.url}")
+
+    _install_mock(monkeypatch, handler)
+
+    def fail_fetch(*args, **kwargs):
+        raise AssertionError("_fetch_job_log must not be called: no failing job")
+
+    monkeypatch.setattr(
+        "lib_python_projects.providers.github._fetch_job_log", fail_fetch,
+    )
+
+
+@pytest.mark.parametrize(
+    "run_payload_fn", [_failed_run_payload, _cancelled_run_payload],
+)
+def test_get_run_failed_run_zero_jobs_sets_infra_note(
+    monkeypatch: pytest.MonkeyPatch, run_payload_fn,
+) -> None:
+    """A failed/cancelled run whose jobs endpoint lists no jobs (e.g. a
+    GitHub-side outage) must carry a note that says no job was started or
+    recorded, that the cause is likely provider/infrastructure-side or a
+    startup error, and that a re-run is the next step."""
+    run_id = 42673680
+    _install_run_with_jobs(
+        monkeypatch, run_payload_fn, run_id, "zerojobs1",
+        {"total_count": 0, "jobs": []},
+    )
+
+    run = GitHubProvider().get_run(
+        _project(), token="t", run_id=str(run_id), include_failure_excerpt=True,
+    )
+
+    assert run.failure is not None
+    assert run.failure.failing_jobs == []
+    note = run.failure.note
+    assert note is not None
+    low = note.lower()
+    assert "no job" in low
+    assert "infrastructure" in low
+    assert "startup" in low
+    assert "re-run" in low
+
+
+def test_get_run_failed_run_no_failing_jobs_sets_infra_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Jobs exist but none ended failure/cancelled: same kind of note,
+    stating the job count, the infra/startup cause and the re-run advice."""
+    run_id = 42673681
+
+    def job(job_id: int, conclusion: str) -> dict:
+        return {
+            "id": job_id,
+            "name": f"job-{job_id}",
+            "status": "completed",
+            "conclusion": conclusion,
+            "html_url": f"https://github.com/acme/backend/actions/runs/{run_id}/job/{job_id}",
+            "steps": [],
+        }
+
+    _install_run_with_jobs(
+        monkeypatch, _failed_run_payload, run_id, "nofail001",
+        {"total_count": 2, "jobs": [job(801, "success"), job(802, "skipped")]},
+    )
+
+    run = GitHubProvider().get_run(
+        _project(), token="t", run_id=str(run_id), include_failure_excerpt=True,
+    )
+
+    assert run.failure is not None
+    assert run.failure.failing_jobs == []
+    note = run.failure.note
+    assert note is not None
+    low = note.lower()
+    assert "2 job" in low
+    assert "infrastructure" in low
+    assert "startup" in low
+    assert "re-run" in low
