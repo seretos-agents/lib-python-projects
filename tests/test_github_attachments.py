@@ -44,10 +44,11 @@ class Fake:
     """Tiny GitHub fake recording every request and its decoded JSON body."""
 
     def __init__(self, monkeypatch, *, push=True, branch_exists=True,
-                 issue_body="", raw_files=None):
+                 issue_body="", comment_body="", raw_files=None):
         self.push = push
         self.branch_exists = branch_exists
         self.issue_body = issue_body
+        self.comment_body = comment_body
         self.raw_files = raw_files or {}
         self.seen: list[httpx.Request] = []
         self.puts: list[tuple[str, dict]] = []
@@ -110,7 +111,7 @@ class Fake:
                             "created_at": "2026-01-01T00:00:00Z",
                             "updated_at": "2026-01-01T00:00:00Z"}, 201)
         if m == "GET" and path == f"{BASE}/issues/comments/55":
-            return self._j({"id": 55, "body": self.issue_body,
+            return self._j({"id": 55, "body": self.comment_body,
                             "user": {"login": "bot"}, "html_url": "",
                             "created_at": "2026-01-01T00:00:00Z",
                             "updated_at": "2026-01-01T00:00:00Z"})
@@ -172,7 +173,9 @@ def test_create_ticket_bootstraps_branch_when_missing(monkeypatch, tmp_path):
     fake = Fake(monkeypatch, branch_exists=False)
     a, _ = _files(tmp_path)
     _create(attachments=[ImageAttachment(a)])
-    order = [(r.method, r.url.path) for r in fake.writes()]
+    order = [
+        (r.method, r.url.path) for r in fake.writes() if "/labels" not in r.url.path
+    ]
     assert order[0] == ("POST", f"{BASE}/git/refs")
     assert fake.posts[0][1] == {"ref": "refs/heads/ticket-attachments", "sha": "main-sha"}
     assert order[1][0] == "PUT"
@@ -273,7 +276,10 @@ def test_refusals_before_write(monkeypatch, tmp_path, method, case):
     assert reason in ei.value.reason
     assert str(ei.value.path) == str(target)
     assert fake.writes() == []
-    if case != "no_push":
+    if case == "no_push":
+        # preflight must precede every label lookup/creation
+        assert all("/labels" not in r.url.path for r in fake.seen)
+    else:
         assert fake.seen == []
 
 
@@ -297,9 +303,12 @@ def test_list_ticket_images(monkeypatch):
 
 
 def test_list_comment_images(monkeypatch):
-    Fake(monkeypatch, issue_body=f"![c]({_REF})")
+    Fake(monkeypatch, issue_body="![ticket](https://h/ticket.png)",
+         comment_body=f"![c]({_REF})")
     out = GitHubProvider().list_ticket_images(_project(), "tok", "7", comment_id="55")
     assert out == [ImageAsset("c", _REF)]
+    out = GitHubProvider().list_ticket_images(_project(), "tok", "7")
+    assert out == [ImageAsset("ticket", "https://h/ticket.png")]
 
 
 def test_list_ticket_images_img_tag(monkeypatch):
@@ -308,12 +317,12 @@ def test_list_ticket_images_img_tag(monkeypatch):
     assert [a.url for a in out] == [_REF]
 
 
-@pytest.mark.parametrize("url", [
-    _REF,
-    "https://github.com/ACME/Backend/raw/ticket-attachments/attachments/u/a.png",
-    "https://raw.githubusercontent.com/acme/backend/ticket-attachments/attachments/u/a.png",
+@pytest.mark.parametrize("url,ref", [
+    (_REF, "ticket-attachments"),
+    ("https://github.com/ACME/Backend/raw/other-branch/attachments/u/a.png", "other-branch"),
+    ("https://raw.githubusercontent.com/acme/backend/v2/attachments/u/a.png", "v2"),
 ])
-def test_download_image_writes_identical_bytes(monkeypatch, tmp_path, url):
+def test_download_image_writes_identical_bytes(monkeypatch, tmp_path, url, ref):
     fake = Fake(monkeypatch, raw_files={"attachments/u/a.png": PNG_A})
     dest = tmp_path / "out.png"
     result = GitHubProvider().download_image(_project(), "tok", url, dest)
@@ -322,7 +331,7 @@ def test_download_image_writes_identical_bytes(monkeypatch, tmp_path, url):
     (req,) = fake.seen
     assert req.method == "GET"
     assert req.url.path == f"{BASE}/contents/attachments/u/a.png"
-    assert req.url.params["ref"] == "ticket-attachments"
+    assert req.url.params["ref"] == ref
     assert req.headers["Accept"] == "application/vnd.github.raw+json"
 
 

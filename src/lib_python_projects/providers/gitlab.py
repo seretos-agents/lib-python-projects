@@ -31,12 +31,18 @@ import os
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from lib_python_projects.models import ProjectConfig
+from lib_python_projects.providers.attachments import (
+    AttachmentUnsupported,
+    ImageAsset,
+    ImageAttachment,
+)
 from lib_python_projects.markers import (
     MarkerSet,
     apply_body_marker,
@@ -2925,6 +2931,7 @@ class GitLabProvider(
         idempotency_key: str | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Create a GitLab issue with the AI-generated marker.
 
@@ -2995,6 +3002,8 @@ class GitLabProvider(
                 (get_ticket) and returns the full Ticket, also with
                 idempotent_replay=True.
         """
+        if attachments:
+            raise AttachmentUnsupported("create_ticket", "gitlab")
         if not title or not title.strip():
             raise ValueError("title must not be blank")
         if idempotency_key:
@@ -3108,6 +3117,7 @@ class GitLabProvider(
         assignees_remove: list[str] | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Update an issue.
 
@@ -3152,6 +3162,8 @@ class GitLabProvider(
             Labels: still applied (the ai-modified label + board
                 on_update auto-labels), same as light=False.
         """
+        if attachments:
+            raise AttachmentUnsupported("update_ticket", "gitlab")
         _validate_label_lists(labels_add, labels_remove)
         markers = _marker_set(project)
         path = _project_path(project)
@@ -3341,6 +3353,7 @@ class GitLabProvider(
         body: str,
         *,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Comment | CommentRef:
         """Post a note on an issue. The AI-comment prefix is applied.
 
@@ -3357,6 +3370,8 @@ class GitLabProvider(
             None: none
             Labels: none applied by this call.
         """
+        if attachments:
+            raise AttachmentUnsupported("add_comment", "gitlab")
         if not body or not body.strip():
             raise ValueError("body must not be empty")
         prefixed = ensure_comment_prefix(body, markers=_marker_set(project))
@@ -3506,6 +3521,27 @@ class GitLabProvider(
         tail.reverse()
         has_more = cur >= 1 or len(collected_oldest_first) > limit
         return tail, has_more
+
+    def list_ticket_images(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        *,
+        comment_id: str | None = None,
+    ) -> list[ImageAsset]:
+        """Image attachments are not supported on gitlab (ticket #304)."""
+        raise AttachmentUnsupported("list_ticket_images", "gitlab")
+
+    def download_image(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        url: str,
+        dest_path: str | Path,
+    ) -> Path:
+        """Image attachments are not supported on gitlab (ticket #304)."""
+        raise AttachmentUnsupported("download_image", "gitlab")
 
     def get_comment(
         self,
