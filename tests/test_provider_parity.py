@@ -2727,3 +2727,61 @@ def test_all_write_methods_declare_light_keyword_only_default_false():
                 f"{provider_cls.__name__}.{method_name}'s `light` parameter "
                 f"must default to False (opt-in), got {param.default!r}"
             )
+
+
+# ---------- #304: image attachments ------------------------------------------
+
+
+def test_attachments_keyword_only_on_all_providers():
+    import inspect
+
+    for provider_cls in (GitHubProvider, GitLabProvider, AzureDevOpsProvider):
+        for name in ("create_ticket", "update_ticket", "add_comment"):
+            sig = inspect.signature(getattr(provider_cls, name))
+            assert "attachments" in sig.parameters, (provider_cls.__name__, name)
+            param = sig.parameters["attachments"]
+            assert param.kind == inspect.Parameter.KEYWORD_ONLY
+            assert param.default is None
+
+
+@pytest.mark.parametrize("provider_cls,provider_name", [
+    (GitLabProvider, "gitlab"), (AzureDevOpsProvider, "azuredevops"),
+])
+def test_attachments_unsupported_on_gitlab_and_azure(
+    monkeypatch, tmp_path, provider_cls, provider_name,
+):
+    from lib_python_projects.providers.attachments import (
+        AttachmentUnsupported,
+        ImageAttachment,
+    )
+
+    sent: list = []
+
+    def no_http(self, request, *a, **kw):
+        sent.append(request)
+        raise AssertionError("no HTTP request may be sent")
+
+    monkeypatch.setattr(httpx.Client, "send", no_http)
+    img = tmp_path / "a.png"
+    img.write_bytes(b"x")
+    att = [ImageAttachment(img)]
+    project = ProjectConfig(
+        id="p", provider=provider_name,
+        path="g/p" if provider_name == "gitlab" else "org/proj/repo",
+        token_env="X",
+    )
+    prov = provider_cls()
+    calls = {
+        "create_ticket": lambda: prov.create_ticket(project, "t", "T", "b", [], [], attachments=att),
+        "update_ticket": lambda: prov.update_ticket(project, "t", "1", body="b", attachments=att),
+        "add_comment": lambda: prov.add_comment(project, "t", "1", "b", attachments=att),
+        "list_ticket_images": lambda: prov.list_ticket_images(project, "t", "1"),
+        "download_image": lambda: prov.download_image(
+            project, "t", "https://x/a.png", tmp_path / "o.png"),
+    }
+    for name, call in calls.items():
+        with pytest.raises(AttachmentUnsupported) as ei:
+            call()
+        assert isinstance(ei.value, NotImplementedError), name
+        assert ei.value.provider == provider_name, name
+    assert sent == []
