@@ -38,12 +38,18 @@ import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from html import escape as html_escape, unescape as html_unescape
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 
 import httpx
 
 from lib_python_projects.models import ProjectConfig
+from lib_python_projects.providers.attachments import (
+    AttachmentUnsupported,
+    ImageAsset,
+    ImageAttachment,
+)
 from lib_python_projects.markers import (
     MarkerSet,
     apply_body_marker,
@@ -3209,6 +3215,7 @@ class AzureDevOpsProvider(
         idempotency_key: str | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Create an ADO work item.
 
@@ -3277,6 +3284,8 @@ class AzureDevOpsProvider(
                 (get_ticket) and returns the full Ticket, also with
                 idempotent_replay=True.
         """
+        if attachments:
+            raise AttachmentUnsupported("create_ticket", "azuredevops")
         if not title or not title.strip():
             raise ValueError("title must not be blank")
         if idempotency_key:
@@ -3428,6 +3437,7 @@ class AzureDevOpsProvider(
         custom_fields: dict[str, Any] | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Update a work item.
 
@@ -3454,6 +3464,8 @@ class AzureDevOpsProvider(
             Labels: still applied (the ai-modified label + board
                 on_update auto-labels), same as light=False.
         """
+        if attachments:
+            raise AttachmentUnsupported("update_ticket", "azuredevops")
         _validate_label_lists(labels_add, labels_remove)
         _validate_int32_id(ticket_id, "ticket")
         # Read current work item (need tags + assignee for diff semantics).
@@ -3677,6 +3689,7 @@ class AzureDevOpsProvider(
         body: str,
         *,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Comment | CommentRef:
         """Post a comment on a work item.
 
@@ -3694,6 +3707,8 @@ class AzureDevOpsProvider(
             None: none
             Labels: none applied by this call.
         """
+        if attachments:
+            raise AttachmentUnsupported("add_comment", "azuredevops")
         if not body or not body.strip():
             raise ValueError("body must not be empty")
         body_with_marker = ensure_comment_prefix(body, markers=_marker_set(project))
@@ -3797,6 +3812,27 @@ class AzureDevOpsProvider(
                     truncated = bool(continuation) and len(collected) >= per_page
                     break
         return collected, truncated
+
+    def list_ticket_images(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        *,
+        comment_id: str | None = None,
+    ) -> list[ImageAsset]:
+        """Image attachments are not supported on azuredevops (ticket #304)."""
+        raise AttachmentUnsupported("list_ticket_images", "azuredevops")
+
+    def download_image(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        url: str,
+        dest_path: str | Path,
+    ) -> Path:
+        """Image attachments are not supported on azuredevops (ticket #304)."""
+        raise AttachmentUnsupported("download_image", "azuredevops")
 
     def get_comment(
         self,

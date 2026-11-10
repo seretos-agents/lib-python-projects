@@ -112,6 +112,28 @@ with `idempotent_replay=True` — the one request cost AC3's promise
 ("`light=False` always returns a `Ticket`/`PullRequest`") requires on
 that specific mixed-`light` replay path.
 
+## Image attachments (ticket #304)
+
+`create_ticket`, `update_ticket` (when `body` is given) and `add_comment`
+accept `attachments=[ImageAttachment(path, alt=None)]`. Each local file
+(png, jpg, jpeg, gif, webp, svg) is uploaded and referenced from the body that
+is sent: a `![x](./shot.png)` ref to an attached file is rewritten to the
+uploaded URL, attached files the body never mentions are appended as
+`![alt](url)` lines (alt defaults to the file name). A missing file, an
+unsupported type or a token without push access raises `AttachmentRejected`
+(`.path`, `.reason`) before anything is written.
+
+`list_ticket_images(project, token, ticket_id, comment_id=None)` returns the
+`ImageAsset(alt, url)` refs in a ticket or comment body;
+`download_image(project, token, url, dest_path)` writes one back byte-identical.
+Only images stored in the project's own repository can be downloaded (other
+hosts raise `ValueError`, the token is never sent there).
+
+| Provider | Support |
+| --- | --- |
+| GitHub | Files are committed through the Contents API to a dedicated `ticket-attachments` branch of the same repo (created from the default branch on first use). The token needs push access. This is a different storage model from GitHub's native web-UI upload, whose upload route is undocumented. |
+| GitLab, Azure DevOps | `AttachmentUnsupported` (a `NotImplementedError`) before any request. |
+
 ## Board support
 
 `ProjectConfig.board` is an optional, provider-agnostic board configuration:

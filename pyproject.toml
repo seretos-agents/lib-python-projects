@@ -43,6 +43,7 @@ testpaths = ["tests"]
 # actions and this test suite) is importable as `ci.*`.
 pythonpath = ["src", "."]
 addopts = "-ra --strict-markers"
+markers = ["live: hits a real provider; needs env vars"]
 # thread-based timeout (not the "signal" default): signal-based timeouts
 # don't work on Windows and can't interrupt blocking socket I/O, thread-based
 # can. A blocked test is killed after 60s instead of hanging the whole suite.

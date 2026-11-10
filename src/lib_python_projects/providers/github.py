@@ -8,8 +8,10 @@ import os
 import posixpath
 import re
 import time
+import uuid
+from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from ruamel.yaml import YAML
@@ -24,6 +26,15 @@ from lib_python_projects.markers import (
     ensure_comment_prefix,
     MarkerSet,
     strip_leading_ai_marker,
+)
+from lib_python_projects.providers.attachments import (
+    AttachmentRejected,
+    ImageAsset,
+    ImageAttachment,
+    _Prepared,
+    extract_image_refs,
+    prepare_attachments,
+    render_body,
 )
 from lib_python_projects.providers.base import (
     apply_run_filters,
@@ -291,6 +302,119 @@ def _check_side_step(resp: httpx.Response) -> str | None:
 
 def _repo_path(project: ProjectConfig) -> str:
     return f"/repos/{project.owner}/{project.repo}"
+
+
+# ---- image attachments (ticket #304) ----------------------------------------
+# Storage model: files are committed through the Contents API to a dedicated
+# branch of the same repo (the native `gh --attach` upload route is
+# undocumented, so it is not used).
+_ATTACHMENT_BRANCH = "ticket-attachments"
+
+
+def _attachment_preflight(
+    client: httpx.Client, project: ProjectConfig, prepared: list[_Prepared]
+) -> str:
+    """Refuse before any write unless the token can push; return the default branch.
+
+    `permissions.push` on `GET /repos/{o}/{r}` is the same signal
+    `probe_token_capabilities` reads. For some token kinds (fine-grained PAT,
+    installation token) it can overstate the token's rights, so
+    `_upload_attachments` also maps a 403/404 on the Contents PUT to the same
+    refusal.
+    """
+    names = ", ".join(p.name for p in prepared)
+    reason = f"token has no push access to {project.owner}/{project.repo}"
+    r = client.get(_repo_path(project))
+    try:
+        _check(r)
+        data = r.json()
+    except (GitHubError, ValueError) as exc:
+        raise AttachmentRejected(
+            prepared[0].path, f"{reason} (repository lookup failed; files: {names})"
+        ) from exc
+    perms = data.get("permissions") if isinstance(data, dict) else None
+    if not isinstance(perms, dict) or not perms.get("push"):
+        raise AttachmentRejected(prepared[0].path, f"{reason} (files: {names})")
+    return str(data.get("default_branch") or "main")
+
+
+def _upload_attachments(
+    client: httpx.Client,
+    project: ProjectConfig,
+    prepared: list[_Prepared],
+    default_branch: str,
+) -> list[str]:
+    """Commit each file to the attachments branch; return their body URLs."""
+    repo = _repo_path(project)
+    r = client.get(f"{repo}/git/ref/heads/{_ATTACHMENT_BRANCH}")
+    if r.status_code == 404:
+        base = client.get(f"{repo}/git/ref/heads/{quote(default_branch, safe='/')}")
+        _check(base)
+        sha = base.json()["object"]["sha"]
+        created = client.post(
+            f"{repo}/git/refs",
+            json={"ref": f"refs/heads/{_ATTACHMENT_BRANCH}", "sha": sha},
+        )
+        _check(created)
+    else:
+        _check(r)
+    folder = uuid.uuid4().hex
+    urls: list[str] = []
+    for item in prepared:
+        rel = f"attachments/{folder}/{item.name}"
+        put = client.put(
+            f"{repo}/contents/{quote(rel, safe='/')}",
+            json={
+                "message": f"attach {item.name}",
+                "content": base64.b64encode(item.data).decode("ascii"),
+                "branch": _ATTACHMENT_BRANCH,
+            },
+        )
+        try:
+            _check(put)
+        except GitHubError as exc:
+            if exc.status in (403, 404):
+                raise AttachmentRejected(
+                    item.path,
+                    f"token has no push access to {project.owner}/{project.repo}"
+                    f" (contents write refused: {exc.message})",
+                ) from exc
+            raise
+        content = put.json().get("content") or {}
+        html_url = content.get("html_url") or (
+            f"https://github.com/{project.owner}/{project.repo}/blob/"
+            f"{_ATTACHMENT_BRANCH}/{rel}"
+        )
+        urls.append(f"{html_url}?raw=true")
+    return urls
+
+
+_GH_IMAGE_URL_RE = re.compile(
+    r"https://github\.com/(?P<o>[^/]+)/(?P<r>[^/]+)/(?:blob|raw)/(?P<ref>[^/]+)/(?P<path>.+)",
+    re.IGNORECASE,
+)
+_RAW_IMAGE_URL_RE = re.compile(
+    r"https://raw\.githubusercontent\.com/(?P<o>[^/]+)/(?P<r>[^/]+)/(?P<ref>[^/]+)/(?P<path>.+)",
+    re.IGNORECASE,
+)
+
+
+def _parse_own_image_url(project: ProjectConfig, url: str) -> tuple[str, str]:
+    """Return `(ref, path)` for a file URL of this project's repo, else ValueError."""
+    bare = url.split("#", 1)[0].split("?", 1)[0]
+    for pattern in (_GH_IMAGE_URL_RE, _RAW_IMAGE_URL_RE):
+        m = pattern.fullmatch(bare)
+        if (
+            m
+            and m["o"].lower() == project.owner.lower()
+            and m["r"].lower() == project.repo.lower()
+        ):
+            return unquote(m["ref"]), unquote(m["path"])
+    raise ValueError(
+        f"cannot download {url!r}: only images stored in {project.owner}/{project.repo} "
+        f"(github.com blob/raw or raw.githubusercontent.com URLs) can be fetched; "
+        f"the token is never sent elsewhere"
+    )
 
 
 _LINK_LAST_RE = re.compile(r'<[^>]*[?&]page=(\d+)[^>]*>;\s*rel="last"')
@@ -3785,6 +3909,7 @@ class GitHubProvider(
         idempotency_key: str | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Create an issue with the project's AI-generated attribution marker.
 
@@ -3920,11 +4045,14 @@ class GitHubProvider(
         merged = list(
             dict.fromkeys([*labels, ai_generated_label, *board_create_labels])
         )
-        prefixed_body = ensure_body_prefix(body, markers=_marker_set(project))
+        prepared = prepare_attachments(attachments) if attachments else []
         # Validate `status` up-front so an invalid value rejects before
         # the POST commits an issue we'd then have to delete or close.
         patch_state, patch_state_reason = _split_github_status(status)
         with _client(token) as client:
+            default_branch = (
+                _attachment_preflight(client, project, prepared) if prepared else ""
+            )
             _assert_labels_exist(client, project, labels)
             label_ok = _ensure_label_best_effort(
                 client, project, ai_generated_label, "generated"
@@ -3937,9 +4065,13 @@ class GitHubProvider(
             for name in board_create_labels:
                 if not _ensure_label_best_effort(client, project, name, "board"):
                     dropped_labels.add(name)
+            send_body = body
+            if prepared:
+                urls = _upload_attachments(client, project, prepared, default_branch)
+                send_body = render_body(body, prepared, urls)
             payload: dict[str, Any] = {
                 "title": title,
-                "body": prefixed_body,
+                "body": ensure_body_prefix(send_body, markers=_marker_set(project)),
             }
             payload_labels = [lbl for lbl in merged if lbl not in dropped_labels]
             if payload_labels:
@@ -4072,6 +4204,7 @@ class GitHubProvider(
         custom_fields: dict[str, Any] | None = None,
         milestone: Any = _UNSET,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Ticket | TicketRef:
         """Update an issue, optionally also writing `custom_fields` to its
         bound Projects v2 board (ticket #145) — the update-side
@@ -4190,6 +4323,12 @@ class GitHubProvider(
                 on_update/on_move_to auto-labels), same as light=False.
         """
         _validate_label_lists(labels_add, labels_remove)
+        if attachments and body is None:
+            raise ValueError(
+                "attachments require a body: the images are referenced from the "
+                "body sent by this call"
+            )
+        prepared = prepare_attachments(attachments) if attachments else []
         binding = None
         if custom_fields:
             board = project.board
@@ -4250,6 +4389,9 @@ class GitHubProvider(
                     ) from exc
                 raise
             current = r0.json()
+            upload_branch = (
+                _attachment_preflight(client, project, prepared) if prepared else ""
+            )
             current_labels = {lbl["name"] for lbl in (current.get("labels") or [])}
             current_assignees = {a["login"] for a in (current.get("assignees") or [])}
             markers = _marker_set(project)
@@ -4375,6 +4517,9 @@ class GitHubProvider(
             if title is not None:
                 payload["title"] = title
             if body is not None:
+                if prepared:
+                    urls = _upload_attachments(client, project, prepared, upload_branch)
+                    body = render_body(body, prepared, urls)
                 # Re-stamp the body's `#ai-*` marker so it matches the
                 # resource's label state after this update (ticket #44).
                 # Caller should NOT prepend the marker themselves; if
@@ -4739,6 +4884,7 @@ class GitHubProvider(
         body: str,
         *,
         light: bool = False,
+        attachments: list[ImageAttachment] | None = None,
     ) -> Comment | CommentRef:
         """Post a comment on an issue (POSTs to
         `/repos/{owner}/{repo}/issues/{ticket_id}/comments`).
@@ -4759,10 +4905,16 @@ class GitHubProvider(
             None: none
             Labels: none applied by this call.
         """
-        if not body or not body.strip():
+        prepared = prepare_attachments(attachments) if attachments else []
+        if not prepared and (not body or not body.strip()):
             raise ValueError("body must not be empty")
-        prefixed = ensure_comment_prefix(body, markers=_marker_set(project))
         with _client(token) as client:
+            send_body = body
+            if prepared:
+                upload_branch = _attachment_preflight(client, project, prepared)
+                urls = _upload_attachments(client, project, prepared, upload_branch)
+                send_body = render_body(body, prepared, urls)
+            prefixed = ensure_comment_prefix(send_body, markers=_marker_set(project))
             r = client.post(
                 f"{_repo_path(project)}/issues/{ticket_id}/comments",
                 json={"body": prefixed},
@@ -4913,6 +5065,54 @@ class GitHubProvider(
             )
             _check(r)
             return _map_comment(r.json())
+
+    def list_ticket_images(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        ticket_id: str,
+        *,
+        comment_id: str | None = None,
+    ) -> list[ImageAsset]:
+        """List the image refs (Markdown and `<img>`) in a ticket's or comment's body.
+
+        Every ref in the body is returned, in body order, whatever host it
+        points at; `download_image` only fetches refs that live in this
+        project's own repository and raises `ValueError` for the others.
+        """
+        if comment_id is not None:
+            text = self.get_comment(project, token, comment_id, ticket_id).body
+        else:
+            text = self.get_ticket(
+                project, token, ticket_id, include_relations=False
+            )[0].body
+        return extract_image_refs(text or "")
+
+    def download_image(
+        self,
+        project: ProjectConfig,
+        token: str | None,
+        url: str,
+        dest_path: str | Path,
+    ) -> Path:
+        """Download an image stored in this project's repository to `dest_path`.
+
+        Accepts `github.com/{o}/{r}/(blob|raw)/{ref}/{path}` and
+        `raw.githubusercontent.com/{o}/{r}/{ref}/{path}` for this project's
+        repo only (a single-segment `ref`); anything else raises `ValueError`
+        before any request, so the token never leaves for a foreign host.
+        """
+        ref, path = _parse_own_image_url(project, url)
+        with _client(token) as client:
+            r = client.get(
+                f"{_repo_path(project)}/contents/{quote(path, safe='/')}",
+                params={"ref": ref},
+                headers={"Accept": "application/vnd.github.raw+json"},
+            )
+            _check(r)
+            dest = Path(dest_path)
+            dest.write_bytes(r.content)
+            return dest
 
     def update_comment(
         self,
